@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict
 
 import requests
+from openai import OpenAI
 
 
 class LLMServiceError(Exception):
@@ -89,37 +90,48 @@ class LLMService:
 
     def _call_groq(self, prompt: str) -> str:
         api_key = os.getenv("GROQ_API_KEY", "").strip()
-        model = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
-        url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1/chat/completions")
+        model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+        base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").strip()
+
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url[: -len("/chat/completions")]
 
         if not api_key:
             raise LLMServiceError("GROQ_API_KEY is missing in environment variables.")
 
-        payload = {
-            "model": model,
-            "temperature": 0.2,
-            "messages": [
-                {"role": "system", "content": "Return valid JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            "response_format": {"type": "json_object"},
-        }
-
         try:
-            response = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=60,
+            client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
             )
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
+
+            response = client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": "Return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+
+            text = (getattr(response, "output_text", "") or "").strip()
+            if text:
+                return text
+
+            # Fallback for SDK variants where output_text is absent.
+            output = getattr(response, "output", None) or []
+            for item in output:
+                contents = getattr(item, "content", None) or []
+                for part in contents:
+                    candidate = getattr(part, "text", "") or ""
+                    if candidate.strip():
+                        return candidate.strip()
+
+            raise LLMServiceError("Groq returned an empty response.")
         except Exception as exc:
-            raise LLMServiceError(f"Groq API call failed: {exc}") from exc
+            raise LLMServiceError(
+                f"Groq API call failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
     def _parse_json_response(self, raw_text: str) -> Dict[str, Any]:
         if not raw_text or not raw_text.strip():
